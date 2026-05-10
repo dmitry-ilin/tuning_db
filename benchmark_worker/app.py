@@ -150,12 +150,12 @@ def _portable_run_query_benchmark(runner: TSBSRunner, db_config_params: dict[str
     all_metrics: dict[str, Any] = {}
     queries_file = runner.generate_queries()
 
-    target_host = os.getenv("TARGET_DB_HOST", "timescaledb")
-    target_port = os.getenv("TARGET_DB_PORT", "5432")
-    target_user = os.getenv("TARGET_DB_USER", "postgres")
-    target_password = os.getenv("TARGET_DB_PASSWORD", "123")
-    target_name = os.getenv("TARGET_DB_NAME", "monitor")
-    timeout_seconds = int(os.getenv("TSBS_COMMAND_TIMEOUT", "600"))
+    target_host = os.getenv("TARGET_DB_HOST")
+    target_port = os.getenv("TARGET_DB_PORT")
+    target_user = os.getenv("TARGET_DB_USER")
+    target_password = os.getenv("TARGET_DB_PASSWORD")
+    target_name = os.getenv("TARGET_DB_NAME")
+    timeout_seconds = int(os.getenv("TSBS_COMMAND_TIMEOUT"))
 
     Path(runner.results_dir).mkdir(parents=True, exist_ok=True)
     Path(runner.queries_dir).mkdir(parents=True, exist_ok=True)

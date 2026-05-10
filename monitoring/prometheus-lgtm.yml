@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Сам Prometheus (встроен в LGTM)
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Метрики оптимизатора tsdb-tuner
+  # (читает experiment_container_stats, experiment_pg_stats, optimization_trials из results DB)
+  - job_name: "tsdb-tuner"
+    static_configs:
+      - targets: ["tuner-exporter:9091"]
+    scrape_interval: 15s
+    metrics_path: /metrics

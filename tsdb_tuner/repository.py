@@ -348,3 +348,198 @@ class ResultsRepository:
                         """,
                         (session_id, metric_name, name, float(importance), rank),
                     )
+
+    # ------------------------------------------------------------------
+    # Методы для хранения метрик мониторинга
+    # ------------------------------------------------------------------
+
+    def save_container_stats(self, experiment_id: int, stats: dict) -> None:
+        """Сохраняет агрегированные метрики контейнеров для эксперимента."""
+        with self.db.conn() as conn:
+            with conn.cursor() as cur:
+                for container_name, s in stats.items():
+                    cur.execute(
+                        """
+                        INSERT INTO public.experiment_container_stats
+                            (experiment_id, container_name, samples,
+                             cpu_pct_avg, cpu_pct_max,
+                             mem_used_mb_avg, mem_used_mb_max, mem_pct_avg,
+                             net_rx_delta_mb, net_tx_delta_mb,
+                             blk_read_delta_mb, blk_write_delta_mb,
+                             duration_sec)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (
+                            experiment_id,
+                            container_name,
+                            s.get("samples", 0),
+                            s.get("cpu_pct_avg"),
+                            s.get("cpu_pct_max"),
+                            s.get("mem_used_mb_avg"),
+                            s.get("mem_used_mb_max"),
+                            s.get("mem_pct_avg"),
+                            s.get("net_rx_delta_mb"),
+                            s.get("net_tx_delta_mb"),
+                            s.get("blk_read_delta_mb"),
+                            s.get("blk_write_delta_mb"),
+                            s.get("duration_sec"),
+                        ),
+                    )
+
+    def save_pg_stats(self, experiment_id: int, snapshot_type: str, stats: dict) -> None:
+        """Сохраняет снимок внутренних метрик СУБД."""
+        import json as _json
+        db_stats = stats.get("db") or {}
+        with self.db.conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.experiment_pg_stats
+                        (experiment_id, snapshot_type, stats_json, db_size_mb,
+                         cache_hit_ratio, active_connections)
+                    VALUES (%s, %s, %s::jsonb, %s, %s, %s)
+                    """,
+                    (
+                        experiment_id,
+                        snapshot_type,
+                        _json.dumps(stats, ensure_ascii=False, default=str),
+                        stats.get("db_size_mb"),
+                        db_stats.get("cache_hit_ratio"),
+                        (stats.get("connections") or {}).get("active"),
+                    ),
+                )
+
+    def get_session_trials_ordered(self, session_id: int) -> list[dict]:
+        """Все trials сессии, отсортированные по score DESC."""
+        return self.db.fetch_all(
+            """
+            SELECT ot.*, e.stage
+            FROM public.optimization_trials ot
+            LEFT JOIN public.experiments e ON e.id = ot.experiment_id
+            WHERE ot.session_id = %s AND ot.score IS NOT NULL
+            ORDER BY ot.score DESC
+            """,
+            (session_id,),
+        )
+
+    def get_generation_best_metrics(self, session_id: int) -> list[dict]:
+        """
+        Лучшие метрики по каждому поколению ГА для графика прогресса.
+        Возвращает список {generation, best_score, best_qps, best_q50_ms, best_q99_ms}.
+        """
+        return self.db.fetch_all(
+            """
+            SELECT
+                ot.generation,
+                MAX(ot.score) AS best_score,
+                MAX((ot.metrics->>'avg_rate_qps')::double precision) AS best_qps,
+                MIN((ot.metrics->>'median_q50_ms')::double precision) AS best_q50_ms,
+                MIN((ot.metrics->>'p99_q99_ms')::double precision)    AS best_q99_ms
+            FROM public.optimization_trials ot
+            WHERE ot.session_id = %s AND ot.score IS NOT NULL
+            GROUP BY ot.generation
+            ORDER BY ot.generation
+            """,
+            (session_id,),
+        )
+
+    def get_experiment_container_stats(self, experiment_id: int) -> list[dict]:
+        return self.db.fetch_all(
+            "SELECT * FROM public.experiment_container_stats WHERE experiment_id = %s",
+            (experiment_id,),
+        )
+
+    def get_experiment_pg_stats(self, experiment_id: int, snapshot_type: str = "post_run") -> dict | None:
+        return self.db.fetch_one(
+            "SELECT * FROM public.experiment_pg_stats WHERE experiment_id = %s AND snapshot_type = %s ORDER BY id DESC LIMIT 1",
+            (experiment_id, snapshot_type),
+        )
+
+    def get_first_finished_experiment_for_session(self, session_id: int) -> dict | None:
+        """Первый успешный эксперимент данной сессии (для baseline в сравнении)."""
+        return self.db.fetch_one(
+            """
+            SELECT vs.*
+            FROM public.optimization_trials ot
+            JOIN public.v_experiment_summary vs ON vs.experiment_id = ot.experiment_id
+            WHERE ot.session_id = %s AND ot.score IS NOT NULL
+            ORDER BY ot.id ASC
+            LIMIT 1
+            """,
+            (session_id,),
+        )
+
+    def get_lhs_baseline_summary(self, scope_ids: list[int] | None = None) -> dict | None:
+        # """Лучшая конфигурация из initial_sampling по score — baseline для сравнения."""
+        # return self.db.fetch_one(
+        #     """
+        #     SELECT vs.*, e.score
+        #     FROM public.v_experiment_summary vs
+        #     JOIN public.experiments e ON e.id = vs.experiment_id
+        #     WHERE vs.stage = 'initial_sampling'
+        #       AND vs.avg_rate_qps IS NOT NULL
+        #       AND e.score IS NOT NULL
+        #     ORDER BY e.score DESC
+        #     LIMIT 1
+        #     """,
+        # )
+        if scope_ids:
+            return self.db.fetch_one(
+                """
+                SELECT vs.*, e.score
+                FROM public.v_experiment_summary vs
+                JOIN public.experiments e ON e.id = vs.experiment_id
+                WHERE vs.experiment_id = ANY(%s)
+                  AND vs.stage = 'initial_sampling'
+                  AND vs.avg_rate_qps IS NOT NULL
+                ORDER BY vs.avg_rate_qps ASC
+                LIMIT 1
+                """,
+                (scope_ids,),
+            )
+        return self.db.fetch_one(
+            """
+            SELECT vs.*, e.score
+            FROM public.v_experiment_summary vs
+            JOIN public.experiments e ON e.id = vs.experiment_id
+            WHERE vs.stage = 'initial_sampling'
+              AND vs.avg_rate_qps IS NOT NULL
+            ORDER BY vs.avg_rate_qps ASC
+            LIMIT 1
+            """,
+        )
+    
+    def save_surrogate_model(
+        self,
+        session_id: int | None,
+        model_type: str,
+        target_metric: str,
+        train_rows: int,
+        feature_names: list[str],
+        hyperparams: dict,
+        train_score: float | None = None,
+    ) -> int:
+        """Сохраняет метаданные обученной суррогатной модели в таблицу surrogate_models."""
+        import json as _json
+        with self.db.conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.surrogate_models
+                        (session_id, model_type, target_metric, train_rows,
+                         feature_names, hyperparams, train_score)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                    RETURNING id
+                    """,
+                    (
+                        session_id,
+                        model_type,
+                        target_metric,
+                        train_rows,
+                        _json.dumps(feature_names, ensure_ascii=False),
+                        _json.dumps(hyperparams, ensure_ascii=False),
+                        train_score,
+                    ),
+                )
+                return int(cur.fetchone()[0])

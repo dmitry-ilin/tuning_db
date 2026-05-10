@@ -78,6 +78,7 @@ services:
       TARGET_DB_PASSWORD: ${TARGET_DB_PASSWORD}
       TARGET_DB_NAME: ${TARGET_DB_NAME}
       TARGET_CONTAINER_NAME: ${TARGET_CONTAINER_NAME}
+      MONITOR_CONTAINERS: "${MONITOR_CONTAINERS}"
     ports:
       - "8081:8080"
     volumes:
@@ -93,6 +94,9 @@ services:
     #     condition: service_healthy
     networks:
       - tsdb-net
+    group_add:
+      - "${DOCKER_GID}"
+      
 
   tuner-service:
     build:
@@ -111,6 +115,7 @@ services:
       - ./config/postgresql.conf:/app/config/postgresql.conf
       - ./config/tuner.yml:/app/config/tuner.yml:ro
       - ./config/param_space.yml:/app/config/param_space.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     # depends_on:
     #   timescaledb:
     #     condition: service_healthy
@@ -120,26 +125,48 @@ services:
     #     condition: service_started
     networks:
       - tsdb-net
+    group_add:
+      - "${DOCKER_GID}"
     stdin_open: true
     tty: true
     command: ["tail", "-f", "/dev/null"]
 
   monitoring:
-    image: grafana/otel-lgtm:latest
+    build:
+      context: .
+      dockerfile: docker/monitoring/Dockerfile
     container_name: monitoring
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER}
       GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
     ports:
-      - "3002:3000"   # Grafana
-      - "4317:4317"   # OpenTelemetry gRPC
-      - "4318:4318"   # OpenTelemetry HTTP
-      - "9092:9090"   # Prometheus внутри LGTM
+      - "3002:3000"
+      - "4317:4317"
+      - "4318:4318"
+      - "9092:9090"
     volumes:
       - lgtm_data:/data
     networks:
       - tsdb-net
+
+  tuner-exporter:
+    build:
+      context: .
+      dockerfile: docker/tuner/Dockerfile
+    container_name: tuner-exporter
+    command: ["python", "-m", "tsdb_tuner.exporter", "--port", "9091", "--interval", "15"]
+    environment:
+      RESULTS_DB_DSN: "${RESULTS_DB_DSN}"
+    ports:
+      - "9091:9091"
+    restart: unless-stopped
+    networks:
+      - tsdb-net
+    volumes:
+    - ./tsbs_data:/app/runtime:ro
+    # depends_on:
+    #   - benchmark_db
 
 
 networks:

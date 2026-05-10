@@ -19,12 +19,17 @@ benchmark:
   burn_in: 0
   prewarm_queries: true
   create_shell_run_record: false
+  monitor_containers: "timescaledb,tsbs-runner,benchmark_db"
+  monitor_interval_sec: 3.0
+  # Если не указан — будет использован TARGET_DB_DSN из окружения.
+  monitor_pg_dsn: "${TARGET_DB_DSN}"
 
 objective:
   # score = qps_weight * avg_rate_qps - p95_weight * p95_q95_ms - p99_weight * p99_q99_ms
-  qps_weight: 1.0
-  p95_weight: 0.10
-  p99_weight: 0.02
+  w_q:  0.30   # приоритет пропускной способности QPS
+  w95:  0.30   # стабильность (95-й перцентиль латентности)
+  w50:  0.20   # медианная задержка
+  w99:  0.20   # хвостовые задержки (99-й перцентиль)
 
 optimizer:
   random_seed: 42
@@ -35,6 +40,6 @@ optimizer:
   mutation_probability: 0.08
   crossover_probability: 0.80
   tournament_size: 3
-  local_gradient_steps: 8
+  local_gradient_steps: 5
   local_learning_rate: 0.08
   elite_count: 2

@@ -584,3 +584,448 @@ if __name__ == '__main__':
     # )
     
     print("Benchmark completed and saved to database")
+
+
+
+
+
+
+
+
+
+
+
+файл exporter
+"""
+exporter.py — Prometheus-экспортёр метрик оптимизатора TimescaleDB.
+
+Показывает данные только по ПОСЛЕДНЕМУ тюнинг-запуску:
+  - Все эксперименты начиная с последнего random-search
+  - Все последующие сессии (ai-initial, ga-optimize) в рамках того же запуска
+
+Метрики (префикс tsdb_tuner_):
+  experiment_qps, experiment_q50_ms, experiment_q95_ms, experiment_q99_ms, experiment_score
+  session_best_score, session_experiments_total, session_duration_seconds
+  ga_generation_best_score, ga_generation_best_qps, ga_generation_best_q99_ms
+  container_cpu_pct_avg/max, container_mem_used_mb_avg/max
+  container_blk_read_mb, container_blk_write_mb, container_net_rx_mb, container_net_tx_mb
+  pg_cache_hit_ratio, pg_active_connections, pg_db_size_mb
+  pg_checkpoints_req_total, pg_buffers_alloc_total
+  surrogate_train_rows, surrogate_train_score_r2
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import time
+
+from prometheus_client import Gauge, start_http_server
+
+import psycopg2
+import psycopg2.extras
+
+
+# ---------------------------------------------------------------------------
+# Метрики
+# ---------------------------------------------------------------------------
+
+G_QPS   = Gauge("tsdb_tuner_experiment_qps",   "QPS бенчмарка",            ["experiment_id", "stage", "session_id"])
+G_Q50   = Gauge("tsdb_tuner_experiment_q50_ms", "Q50 латентность (мс)",     ["experiment_id", "stage", "session_id"])
+G_Q95   = Gauge("tsdb_tuner_experiment_q95_ms", "Q95 латентность (мс)",     ["experiment_id", "stage", "session_id"])
+G_Q99   = Gauge("tsdb_tuner_experiment_q99_ms", "Q99 латентность (мс)",     ["experiment_id", "stage", "session_id"])
+G_SCORE = Gauge("tsdb_tuner_experiment_score",  "Функция пригодности Φ(x)", ["experiment_id", "stage", "session_id"])
+
+G_SESSION_BEST  = Gauge("tsdb_tuner_session_best_score",        "Лучший score сессии",     ["session_id", "algorithm", "name"])
+G_SESSION_COUNT = Gauge("tsdb_tuner_session_experiments_total", "Экспериментов в сессии",  ["session_id", "algorithm"])
+G_SESSION_DUR   = Gauge("tsdb_tuner_session_duration_seconds",  "Длительность сессии (с)", ["session_id", "algorithm"])
+
+G_GEN_SCORE = Gauge("tsdb_tuner_ga_generation_best_score",  "Лучший score поколения", ["session_id", "generation"])
+G_GEN_QPS   = Gauge("tsdb_tuner_ga_generation_best_qps",    "Лучший QPS поколения",   ["session_id", "generation"])
+G_GEN_Q99   = Gauge("tsdb_tuner_ga_generation_best_q99_ms", "Лучший Q99 поколения",   ["session_id", "generation"])
+
+G_CPU_AVG   = Gauge("tsdb_tuner_container_cpu_pct_avg",     "CPU avg %",      ["experiment_id", "container"])
+G_CPU_MAX   = Gauge("tsdb_tuner_container_cpu_pct_max",     "CPU max %",      ["experiment_id", "container"])
+G_MEM_AVG   = Gauge("tsdb_tuner_container_mem_used_mb_avg", "RAM avg MiB",    ["experiment_id", "container"])
+G_MEM_MAX   = Gauge("tsdb_tuner_container_mem_used_mb_max", "RAM max MiB",    ["experiment_id", "container"])
+G_BLK_READ  = Gauge("tsdb_tuner_container_blk_read_mb",    "Disk read MiB",  ["experiment_id", "container"])
+G_BLK_WRITE = Gauge("tsdb_tuner_container_blk_write_mb",   "Disk write MiB", ["experiment_id", "container"])
+G_NET_RX    = Gauge("tsdb_tuner_container_net_rx_mb",      "Net RX MiB",     ["experiment_id", "container"])
+G_NET_TX    = Gauge("tsdb_tuner_container_net_tx_mb",      "Net TX MiB",     ["experiment_id", "container"])
+
+G_CACHE_HIT = Gauge("tsdb_tuner_pg_cache_hit_ratio",      "Cache hit ratio",    ["experiment_id", "snapshot"])
+G_CONN      = Gauge("tsdb_tuner_pg_active_connections",    "Active connections", ["experiment_id", "snapshot"])
+G_DB_SIZE   = Gauge("tsdb_tuner_pg_db_size_mb",            "DB size MiB",        ["experiment_id", "snapshot"])
+G_CKPT      = Gauge("tsdb_tuner_pg_checkpoints_req_total", "Checkpoints req",    ["experiment_id", "snapshot"])
+G_BUF_ALLOC = Gauge("tsdb_tuner_pg_buffers_alloc_total",   "Buffers alloc",      ["experiment_id", "snapshot"])
+
+G_SURR_ROWS = Gauge("tsdb_tuner_surrogate_train_rows",     "Обучающих точек", ["session_id", "model_type", "generation"])
+G_SURR_R2   = Gauge("tsdb_tuner_surrogate_train_score_r2", "R² суррогата",    ["session_id", "model_type", "generation"])
+
+
+# ---------------------------------------------------------------------------
+# Сборщик
+# ---------------------------------------------------------------------------
+
+class TunerCollector:
+    def __init__(self, dsn: str):
+        self.dsn = dsn
+
+    def _connect(self):
+        conn = psycopg2.connect(self.dsn)
+        conn.set_session(autocommit=True)
+        return conn
+
+    # def _get_last_run_scope(self, cur) -> tuple[list[int], list[int]]:
+    #     """
+    #     Определяет эксперименты и сессии последнего тюнинг-запуска.
+
+    #     Логика:
+    #       1. Находим последнюю сессию random-search
+    #       2. Берём все её эксперименты
+    #       3. Находим все сессии (ai-initial, ga-optimize) созданные ПОСЛЕ неё
+    #       4. Берём все их эксперименты
+
+    #     Возвращает (experiment_ids, session_ids)
+    #     """
+    #     # Последняя сессия random-search
+    #     cur.execute("""
+    #         SELECT id, started_at
+    #         FROM public.optimization_sessions
+    #         WHERE algorithm IN ('random', 'lhs', 'random_search', 'initial_sampling')
+    #         ORDER BY id DESC
+    #         LIMIT 1
+    #     """)
+    #     last_rs = cur.fetchone()
+
+    #     if not last_rs:
+    #         # Нет random-search — берём последние 50 экспериментов
+    #         cur.execute("SELECT id FROM public.experiments ORDER BY id DESC LIMIT 50")
+    #         exp_ids = [r["id"] for r in cur.fetchall()]
+    #         cur.execute("SELECT id FROM public.optimization_sessions ORDER BY id DESC LIMIT 5")
+    #         sess_ids = [r["id"] for r in cur.fetchall()]
+    #         return exp_ids, sess_ids
+
+    #     last_rs_id = last_rs["id"]
+    #     last_rs_started = last_rs["started_at"]
+
+    #     # Все сессии начиная с последнего random-search (включительно)
+    #     cur.execute("""
+    #         SELECT id FROM public.optimization_sessions
+    #         WHERE id >= %s
+    #         ORDER BY id
+    #     """, (last_rs_id,))
+    #     sess_ids = [r["id"] for r in cur.fetchall()]
+
+    #     if not sess_ids:
+    #         return [], []
+
+    #     # Все эксперименты этих сессий
+    #     cur.execute("""
+    #         SELECT DISTINCT experiment_id
+    #         FROM public.optimization_trials
+    #         WHERE session_id = ANY(%s)
+    #           AND experiment_id IS NOT NULL
+    #         ORDER BY experiment_id
+    #     """, (sess_ids,))
+    #     exp_ids = [r["experiment_id"] for r in cur.fetchall()]
+
+    #     # Также добавляем эксперименты random-search (они могут быть без trials)
+    #     cur.execute("""
+    #         SELECT id FROM public.experiments
+    #         WHERE created_at >= %s
+    #         ORDER BY id
+    #     """, (last_rs_started,))
+    #     extra_exp = [r["id"] for r in cur.fetchall()]
+    #     exp_ids = sorted(set(exp_ids + extra_exp))
+
+    #     return exp_ids, sess_ids
+
+    def collect_all(self) -> None:
+        try:
+            conn = self._connect()
+            try:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    exp_ids, sess_ids = self._get_last_run_scope(cur)
+
+                    if not exp_ids and not sess_ids:
+                        print("[exporter] Нет данных для последнего запуска")
+                        return
+
+                    print(f"[exporter] Последний запуск: {len(exp_ids)} экспериментов, {len(sess_ids)} сессий")
+
+                    self._collect_experiments(cur, exp_ids, sess_ids)
+                    self._collect_sessions(cur, sess_ids)
+                    self._collect_ga_generations(cur, sess_ids)
+                    self._collect_container_stats(cur, exp_ids)
+                    self._collect_pg_stats(cur, exp_ids)
+                    self._collect_surrogate_models(cur, sess_ids)
+            finally:
+                conn.close()
+        except Exception as exc:
+            print(f"[exporter] collect error: {exc}")
+
+    def _get_last_run_scope(self, cur) -> tuple[list[int], list[int]]:
+        """
+        Определяет эксперименты и сессии последнего тюнинг-запуска.
+
+        Логика:
+        1. Ищем последнюю сессию random-search как точку отсчёта
+        2. Если random-search не было — берём только последнюю GA-сессию
+        3. Возвращаем все эксперименты найденных сессий
+
+        Возвращает (experiment_ids, session_ids)
+        """
+        # Пробуем найти последний random-search как точку отсчёта
+        cur.execute("""
+            SELECT id, started_at
+            FROM public.optimization_sessions
+            WHERE algorithm IN ('random', 'lhs', 'random_search', 'initial_sampling')
+            ORDER BY id DESC
+            LIMIT 1
+        """)
+        last_rs = cur.fetchone()
+
+        if last_rs:
+            # Есть random-search — берём все сессии начиная с него
+            cur.execute("""
+                SELECT id FROM public.optimization_sessions
+                WHERE id >= %s
+                ORDER BY id
+            """, (last_rs["id"],))
+            sess_ids = [r["id"] for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT DISTINCT experiment_id
+                FROM public.optimization_trials
+                WHERE session_id = ANY(%s)
+                AND experiment_id IS NOT NULL
+                ORDER BY experiment_id
+            """, (sess_ids,))
+            exp_ids = [r["experiment_id"] for r in cur.fetchall()]
+
+            # Добавляем эксперименты random-search (могут быть без trials)
+            cur.execute("""
+                SELECT id FROM public.experiments
+                WHERE created_at >= %s
+                ORDER BY id
+            """, (last_rs["started_at"],))
+            extra = [r["id"] for r in cur.fetchall()]
+            exp_ids = sorted(set(exp_ids + extra))
+        else:
+            # Нет random-search — берём только последнюю GA-сессию
+            cur.execute("""
+                SELECT id, started_at
+                FROM public.optimization_sessions
+                ORDER BY id DESC
+                LIMIT 1
+            """)
+            last_sess = cur.fetchone()
+            if not last_sess:
+                return [], []
+
+            sess_ids = [last_sess["id"]]
+
+            cur.execute("""
+                SELECT DISTINCT experiment_id
+                FROM public.optimization_trials
+                WHERE session_id = %s
+                AND experiment_id IS NOT NULL
+                ORDER BY experiment_id
+            """, (last_sess["id"],))
+            exp_ids = [r["experiment_id"] for r in cur.fetchall()]
+
+        return exp_ids, sess_ids
+
+    def _collect_experiments(self, cur, exp_ids: list[int], sess_ids: list[int]) -> None:
+        if not exp_ids:
+            return
+        cur.execute("""
+            SELECT
+                vs.experiment_id::text,
+                vs.stage,
+                COALESCE(ot.session_id::text, '0') AS session_id,
+                vs.avg_rate_qps,
+                vs.median_q50_ms,
+                vs.p95_q95_ms,
+                vs.p99_q99_ms,
+                e.score
+            FROM public.v_experiment_summary vs
+            JOIN public.experiments e ON e.id = vs.experiment_id
+            LEFT JOIN public.optimization_trials ot ON ot.experiment_id = vs.experiment_id
+                AND ot.session_id = ANY(%s)
+            WHERE vs.experiment_id = ANY(%s)
+              AND vs.avg_rate_qps IS NOT NULL
+            ORDER BY vs.experiment_id
+        """, (sess_ids, exp_ids))
+
+        for r in cur.fetchall():
+            eid  = str(r["experiment_id"])
+            stage = str(r["stage"] or "unknown")
+            sid   = str(r["session_id"])
+            if r["avg_rate_qps"]:
+                G_QPS.labels(eid, stage, sid).set(float(r["avg_rate_qps"]))
+            if r["median_q50_ms"]:
+                G_Q50.labels(eid, stage, sid).set(float(r["median_q50_ms"]))
+            if r["p95_q95_ms"]:
+                G_Q95.labels(eid, stage, sid).set(float(r["p95_q95_ms"]))
+            if r["p99_q99_ms"]:
+                G_Q99.labels(eid, stage, sid).set(float(r["p99_q99_ms"]))
+            if r["score"] is not None:
+                G_SCORE.labels(eid, stage, sid).set(float(r["score"]))
+
+    def _collect_sessions(self, cur, sess_ids: list[int]) -> None:
+        if not sess_ids:
+            return
+        cur.execute("""
+            SELECT
+                id::text AS session_id,
+                algorithm,
+                name,
+                best_score,
+                started_at,
+                finished_at,
+                (SELECT count(*) FROM public.optimization_trials ot WHERE ot.session_id = os.id) AS exp_count
+            FROM public.optimization_sessions os
+            WHERE id = ANY(%s)
+            ORDER BY id
+        """, (sess_ids,))
+
+        for r in cur.fetchall():
+            sid  = str(r["session_id"])
+            algo = str(r["algorithm"] or "unknown")
+            name = str(r["name"] or "")
+            if r["best_score"] is not None:
+                G_SESSION_BEST.labels(sid, algo, name).set(float(r["best_score"]))
+            if r["exp_count"]:
+                G_SESSION_COUNT.labels(sid, algo).set(int(r["exp_count"]))
+            if r["started_at"] and r["finished_at"]:
+                dur = (r["finished_at"] - r["started_at"]).total_seconds()
+                G_SESSION_DUR.labels(sid, algo).set(dur)
+
+    def _collect_ga_generations(self, cur, sess_ids: list[int]) -> None:
+        if not sess_ids:
+            return
+        cur.execute("""
+            SELECT session_id::text, generation::text,
+                   best_score, best_qps, best_q99_ms
+            FROM public.v_ga_generation_progress
+            WHERE session_id = ANY(%s)
+            ORDER BY session_id, generation
+        """, (sess_ids,))
+
+        for r in cur.fetchall():
+            sid = str(r["session_id"])
+            gen = str(r["generation"])
+            if r["best_score"] is not None:
+                G_GEN_SCORE.labels(sid, gen).set(float(r["best_score"]))
+            if r["best_qps"] is not None:
+                G_GEN_QPS.labels(sid, gen).set(float(r["best_qps"]))
+            if r["best_q99_ms"] is not None:
+                G_GEN_Q99.labels(sid, gen).set(float(r["best_q99_ms"]))
+
+    def _collect_container_stats(self, cur, exp_ids: list[int]) -> None:
+        if not exp_ids:
+            return
+        cur.execute("""
+            SELECT experiment_id::text, container_name,
+                   cpu_pct_avg, cpu_pct_max,
+                   mem_used_mb_avg, mem_used_mb_max,
+                   blk_read_delta_mb, blk_write_delta_mb,
+                   net_rx_delta_mb, net_tx_delta_mb
+            FROM public.experiment_container_stats
+            WHERE experiment_id = ANY(%s)
+            ORDER BY experiment_id
+        """, (exp_ids,))
+
+        for r in cur.fetchall():
+            eid  = str(r["experiment_id"])
+            name = str(r["container_name"])
+            def _s(g, field):
+                if r[field] is not None:
+                    g.labels(eid, name).set(float(r[field]))
+            _s(G_CPU_AVG,   "cpu_pct_avg")
+            _s(G_CPU_MAX,   "cpu_pct_max")
+            _s(G_MEM_AVG,   "mem_used_mb_avg")
+            _s(G_MEM_MAX,   "mem_used_mb_max")
+            _s(G_BLK_READ,  "blk_read_delta_mb")
+            _s(G_BLK_WRITE, "blk_write_delta_mb")
+            _s(G_NET_RX,    "net_rx_delta_mb")
+            _s(G_NET_TX,    "net_tx_delta_mb")
+
+    def _collect_pg_stats(self, cur, exp_ids: list[int]) -> None:
+        if not exp_ids:
+            return
+        cur.execute("""
+            SELECT experiment_id::text, snapshot_type,
+                   cache_hit_ratio, active_connections, db_size_mb,
+                   (stats_json->'bgwriter'->>'checkpoints_req')::double precision AS ckpt_req,
+                   (stats_json->'bgwriter'->>'buffers_alloc')::double precision   AS buf_alloc
+            FROM public.experiment_pg_stats
+            WHERE experiment_id = ANY(%s)
+            ORDER BY experiment_id, snapshot_type
+        """, (exp_ids,))
+
+        for r in cur.fetchall():
+            eid  = str(r["experiment_id"])
+            snap = str(r["snapshot_type"])
+            def _s(g, field):
+                if r[field] is not None:
+                    g.labels(eid, snap).set(float(r[field]))
+            _s(G_CACHE_HIT, "cache_hit_ratio")
+            _s(G_CONN,      "active_connections")
+            _s(G_DB_SIZE,   "db_size_mb")
+            _s(G_CKPT,      "ckpt_req")
+            _s(G_BUF_ALLOC, "buf_alloc")
+
+    def _collect_surrogate_models(self, cur, sess_ids: list[int]) -> None:
+        if not sess_ids:
+            return
+        cur.execute("""
+            SELECT
+                COALESCE(session_id::text, '0') AS session_id,
+                model_type,
+                train_rows,
+                train_score,
+                ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS gen_num
+            FROM public.surrogate_models
+            WHERE session_id = ANY(%s)
+            ORDER BY id
+        """, (sess_ids,))
+
+        for r in cur.fetchall():
+            sid   = str(r["session_id"])
+            mtype = str(r["model_type"])
+            gen   = str(r["gen_num"])
+            if r["train_rows"]:
+                G_SURR_ROWS.labels(sid, mtype, gen).set(int(r["train_rows"]))
+            if r["train_score"] is not None:
+                G_SURR_R2.labels(sid, mtype, gen).set(float(r["train_score"]))
+
+
+# ---------------------------------------------------------------------------
+# Точка входа
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Prometheus exporter для tsdb-tuner")
+    parser.add_argument("--port",     type=int,   default=int(os.getenv("EXPORTER_PORT", "9091")))
+    parser.add_argument("--interval", type=float, default=float(os.getenv("SCRAPE_INTERVAL", "15")))
+    parser.add_argument("--dsn",      default=os.getenv("RESULTS_DB_DSN", ""))
+    args = parser.parse_args()
+
+    if not args.dsn:
+        raise SystemExit("Укажите RESULTS_DB_DSN или --dsn")
+
+    collector = TunerCollector(dsn=args.dsn)
+
+    print(f"[exporter] Запуск на порту {args.port}, интервал {args.interval}с")
+    start_http_server(args.port)
+
+    while True:
+        collector.collect_all()
+        time.sleep(args.interval)
+
+
+if __name__ == "__main__":
+    main()

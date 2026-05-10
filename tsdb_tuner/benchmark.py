@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config_apply import ConfigApplier
+from .monitoring import ContainerMonitor, collect_pg_stats
 from .objective import add_normalized_scores, score_summary
 from .repository import ResultsRepository
 from .state import load_last_scope
@@ -22,6 +23,9 @@ class EvaluationResult:
     run_id: int | None
     metrics: dict[str, Any]
     score: float
+    container_stats: dict[str, Any] | None = None   # агрегированные метрики контейнеров
+    pg_stats_pre: dict[str, Any] | None = None      # снимок СУБД до запуска бенчмарка
+    pg_stats_post: dict[str, Any] | None = None     # снимок СУБД после запуска бенчмарка
 
 
 class BenchmarkService:
@@ -40,11 +44,21 @@ class BenchmarkService:
         applier: ConfigApplier,
         benchmark_settings: dict[str, Any],
         objective_settings: dict[str, Any],
+        target_db_dsn: str | None = None,
     ):
         self.repo = repo
         self.applier = applier
         self.benchmark_settings = benchmark_settings
         self.objective_settings = objective_settings
+        # Имена Docker-контейнеров для мониторинга (настраивается в tuner.yml → benchmark.monitor_containers)
+        raw_containers = benchmark_settings.get("monitor_containers", "")
+        if isinstance(raw_containers, list):
+            self._monitor_containers: list[str] = [c for c in raw_containers if c]
+        else:
+            self._monitor_containers = [c.strip() for c in str(raw_containers).split(",") if c.strip()]
+        self._monitor_interval: float = float(benchmark_settings.get("monitor_interval_sec", 3.0))
+        # DSN для сбора внутренних метрик СУБД (если указан в tuner.yml)
+        self._target_db_dsn: str | None = target_db_dsn or benchmark_settings.get("monitor_pg_dsn")
 
     def evaluate(
         self,
@@ -75,6 +89,11 @@ class BenchmarkService:
 
         shell_run_id: int | None = None
         config_json_path: Path | None = None
+        container_monitor: ContainerMonitor | None = None
+        container_stats_agg: dict[str, Any] = {}
+        pg_stats_pre: dict[str, Any] = {}
+        pg_stats_post: dict[str, Any] = {}
+
         try:
             if apply_config:
                 self.applier.apply(config)
@@ -118,6 +137,21 @@ class BenchmarkService:
                     }
                 )
 
+                # ── Сбор метрик СУБД ДО запуска бенчмарка ──────────────────────
+                if self._target_db_dsn:
+                    try:
+                        pg_stats_pre = collect_pg_stats(self._target_db_dsn)
+                    except Exception:
+                        pg_stats_pre = {}
+
+                # ── Запуск мониторинга контейнеров ─────────────────────────────
+                if self._monitor_containers:
+                    container_monitor = ContainerMonitor(
+                        self._monitor_containers,
+                        interval_sec=self._monitor_interval,
+                    )
+                    container_monitor.start()
+
                 started = time.time()
                 completed = subprocess.run(
                     command,
@@ -127,6 +161,35 @@ class BenchmarkService:
                     timeout=int(self.benchmark_settings.get("timeout_seconds", 1800)),
                     env=env,
                 )
+
+                # ── Остановка мониторинга контейнеров ──────────────────────────
+                if container_monitor is not None:
+                    raw_stats = container_monitor.stop()
+                    # Конвертируем dataclass → dict для сериализации
+                    container_stats_agg = {
+                        name: {
+                            "samples": s.samples,
+                            "cpu_pct_avg": round(s.cpu_pct_avg, 2),
+                            "cpu_pct_max": round(s.cpu_pct_max, 2),
+                            "mem_used_mb_avg": round(s.mem_used_mb_avg, 1),
+                            "mem_used_mb_max": round(s.mem_used_mb_max, 1),
+                            "mem_pct_avg": round(s.mem_pct_avg, 2),
+                            "net_rx_delta_mb": round(s.net_rx_delta_mb, 3),
+                            "net_tx_delta_mb": round(s.net_tx_delta_mb, 3),
+                            "blk_read_delta_mb": round(s.blk_read_delta_mb, 3),
+                            "blk_write_delta_mb": round(s.blk_write_delta_mb, 3),
+                            "duration_sec": round(s.duration_sec, 1),
+                        }
+                        for name, s in raw_stats.items()
+                    }
+
+                # ── Сбор метрик СУБД ПОСЛЕ запуска бенчмарка ───────────────────
+                if self._target_db_dsn:
+                    try:
+                        pg_stats_post = collect_pg_stats(self._target_db_dsn)
+                    except Exception:
+                        pg_stats_post = {}
+
                 status = "finished" if completed.returncode == 0 else "failed"
                 if shell_run_id:
                     self.repo.finish_run_shell_record(
@@ -156,20 +219,39 @@ class BenchmarkService:
                 history = self.repo.summaries_by_experiment_ids(scope_ids)
             else:
                 history = self.repo.all_summaries(min_runs=1)
-            scored_rows = add_normalized_scores(history + [dict(summary)], self.objective_settings)
-            score = scored_rows[-1]["score"] if scored_rows else score_summary(summary, self.objective_settings)
+            all_rows = history + [dict(summary)]
+            scored_rows = add_normalized_scores(all_rows, self.objective_settings)
+            # scored_rows[-1] — текущий эксперимент с полями q_norm, l95_norm и т.д.
+            score = scored_rows[-1]["score"] if scored_rows else 0.0
             self.repo.update_experiment_status(experiment_id, "finished", score)
+
+            # ── Сохраняем метрики мониторинга в БД ─────────────────────────────
+            if container_stats_agg:
+                self.repo.save_container_stats(experiment_id, container_stats_agg)
+            if pg_stats_pre:
+                self.repo.save_pg_stats(experiment_id, "pre_run", pg_stats_pre)
+            if pg_stats_post:
+                self.repo.save_pg_stats(experiment_id, "post_run", pg_stats_post)
+
             return EvaluationResult(
                 config_id=config_id,
                 experiment_id=experiment_id,
                 run_id=shell_run_id,
                 metrics=dict(summary),
                 score=score,
+                container_stats=container_stats_agg or None,
+                pg_stats_pre=pg_stats_pre or None,
+                pg_stats_post=pg_stats_post or None,
             )
         except Exception as exc:
             self.repo.update_experiment_status(experiment_id, "failed")
             if shell_run_id:
                 self.repo.finish_run_shell_record(shell_run_id, "failed", None, error_text=str(exc))
+            if container_monitor is not None:
+                try:
+                    container_monitor.stop()
+                except Exception:
+                    pass
             raise
         finally:
             if config_json_path and config_json_path.exists():

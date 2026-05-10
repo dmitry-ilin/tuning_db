@@ -3,12 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import warnings
+
 import numpy as np
+from sklearn.exceptions import ConvergenceWarning, UndefinedMetricWarning
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 
 from .analyzer import summaries_to_frame
-from .objective import score_summary
+from .objective import add_normalized_scores, score_summary
 from .params import ParameterSpec, denormalize_vector, normalize_config, repair_config
 
 
@@ -43,24 +46,42 @@ class NeuralSurrogate:
             n_iter_no_change=30,
         )
         self._trained = False
+        self._y_min: float = 0.0
+        self._y_max: float = 1.0
 
     def fit(self, summaries: list[dict[str, Any]], objective_params: dict[str, Any]) -> bool:
-        if len(summaries) < 8:
+        if len(summaries) < 5:  # минимум 5 точек для обучения суррогата
             return False
         df = summaries_to_frame(summaries, self.specs)
         feature_cols = [name for name in self.top_params if name in df.columns]
         if len(feature_cols) < 2:
             return False
-        x = df[feature_cols].fillna(0.0).to_numpy(dtype=float)
-        y = np.asarray([score_summary(row, objective_params) for row in df.to_dict("records")], dtype=float)
+        records = df.to_dict("records")
+        # Используем нормализованный score [0..1] — иначе суррогат обучается
+        # на значениях ~1400 (raw QPS), градиент взрывается и предсказания бессмысленны
+        scored_rows = add_normalized_scores(records, objective_params)
+        y = np.asarray([r["score"] for r in scored_rows], dtype=float)
         if len(np.unique(np.round(y, 8))) <= 1:
             return False
         x_norm = []
-        for row in df.to_dict("records"):
+        for row in records:
             x_norm.append(normalize_config(row, self.specs, self.top_params))
         X = np.asarray(x_norm, dtype=float)
         Xs = self.scaler.fit_transform(X)
-        self.model.fit(Xs, y)
+
+        # early_stopping требует validation split — при малом числе точек (<25)
+        # в validation попадает <2 сэмпла и sklearn бросает UndefinedMetricWarning на R².
+        # При n < 25 отключаем early_stopping и полагаемся на max_iter + n_iter_no_change.
+        n = len(summaries)
+        self.model.set_params(early_stopping=n >= 25)
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UndefinedMetricWarning)
+            warnings.filterwarnings("ignore", category=ConvergenceWarning)
+            self.model.fit(Xs, y)
+
+        self._y_min = float(y.min())
+        self._y_max = float(y.max())
         self._trained = True
         return True
 
@@ -68,7 +89,12 @@ class NeuralSurrogate:
         if not self._trained:
             raise RuntimeError("NeuralSurrogate is not trained")
         vector = np.clip(vector.astype(float), 0.0, 1.0).reshape(1, -1)
-        return float(self.model.predict(self.scaler.transform(vector))[0])
+        raw = float(self.model.predict(self.scaler.transform(vector))[0])
+        # Ограничиваем предсказание диапазоном обучающих данных ±20%,
+        # чтобы суррогат не взрывался при экстраполяции за пределы LHS-данных
+        lo = float(self._y_min - 0.2 * abs(self._y_min))
+        hi = float(self._y_max + 0.2 * abs(self._y_max))
+        return float(np.clip(raw, lo, hi))
 
     def improve(
         self,

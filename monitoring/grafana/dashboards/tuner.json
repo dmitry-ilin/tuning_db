@@ -1,0 +1,576 @@
+{
+  "title": "TimescaleDB Tuner — Оптимизация параметров",
+  "uid": "tsdb-tuner-main",
+  "tags": [
+    "timescaledb",
+    "tuner",
+    "optimization"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "refresh": "15s",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "🏆 Лучший Score сессии",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "expr": "max(tsdb_tuner_session_best_score)",
+          "legendFormat": "Score"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "⚡ Лучший QPS",
+      "type": "stat",
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 500
+              },
+              {
+                "color": "green",
+                "value": 1000
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "expr": "max(tsdb_tuner_session_best_qps)",
+          "legendFormat": "QPS"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "⏱ Лучший Q99 (мс)",
+      "type": "stat",
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "expr": "min(tsdb_tuner_session_best_q99_ms)",
+          "legendFormat": "Q99"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "🧪 Число экспериментов",
+      "type": "stat",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "max(tsdb_tuner_session_experiments_total)",
+          "legendFormat": "Experiments"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "📈 Прогресс Score по поколениям ГА",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        }
+      },
+      "targets": [
+        {
+          "expr": "tsdb_tuner_ga_generation_best_score",
+          "legendFormat": "Score (поколение {{generation}})"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "⚡ QPS по поколениям ГА",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "tsdb_tuner_ga_generation_best_qps",
+          "legendFormat": "QPS (поколение {{generation}})"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "📊 QPS всех экспериментов",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 5
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden"
+        }
+      },
+      "targets": [
+        {
+          "expr": "tsdb_tuner_experiment_qps",
+          "legendFormat": "exp {{experiment_id}} {{stage}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "⏱ Латентность Q50 / Q95 / Q99 по экспериментам",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "lineWidth": 1
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        }
+      },
+      "targets": [
+        {
+          "expr": "avg by (stage) (tsdb_tuner_experiment_q50_ms)",
+          "legendFormat": "Q50 {{stage}}"
+        },
+        {
+          "expr": "avg by (stage) (tsdb_tuner_experiment_q95_ms)",
+          "legendFormat": "Q95 {{stage}}"
+        },
+        {
+          "expr": "avg by (stage) (tsdb_tuner_experiment_q99_ms)",
+          "legendFormat": "Q99 {{stage}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "🐳 CPU контейнеров (%)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "lineWidth": 2
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "avg by (container) (tsdb_tuner_container_cpu_pct_avg)",
+          "legendFormat": "{{container}} avg %"
+        },
+        {
+          "expr": "max by (container) (tsdb_tuner_container_cpu_pct_max)",
+          "legendFormat": "{{container}} max %"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "🐳 RAM контейнеров (MiB)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "custom": {
+            "lineWidth": 2
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "avg by (container) (tsdb_tuner_container_mem_used_mb_avg)",
+          "legendFormat": "{{container}} avg MiB"
+        },
+        {
+          "expr": "max by (container) (tsdb_tuner_container_mem_used_mb_max)",
+          "legendFormat": "{{container}} max MiB"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "🗄️ Cache Hit Ratio СУБД",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 8,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 4,
+          "custom": {
+            "lineWidth": 2
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.85
+              },
+              {
+                "color": "green",
+                "value": 0.95
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "avg(tsdb_tuner_pg_cache_hit_ratio{snapshot=\"post_run\"})",
+          "legendFormat": "Cache Hit Ratio"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "🗄️ Размер БД (MiB)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 27,
+        "w": 8,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "custom": {
+            "lineWidth": 2
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "max(tsdb_tuner_pg_db_size_mb{snapshot=\"post_run\"})",
+          "legendFormat": "DB size MiB"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "🤖 R² суррогатных моделей",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 27,
+        "w": 8,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 3,
+          "custom": {
+            "lineWidth": 2
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "tsdb_tuner_surrogate_train_score_r2",
+          "legendFormat": "{{model_type}} поколение {{generation}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "🗄️ Disk I/O контейнеров (MiB/эксперимент)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "avg by (container) (tsdb_tuner_container_blk_read_mb)",
+          "legendFormat": "{{container}} Read MiB"
+        },
+        {
+          "expr": "avg by (container) (tsdb_tuner_container_blk_write_mb)",
+          "legendFormat": "{{container}} Write MiB"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "🌐 Network I/O контейнеров (MiB/эксперимент)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 34,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "avg by (container) (tsdb_tuner_container_net_rx_mb)",
+          "legendFormat": "{{container}} RX MiB"
+        },
+        {
+          "expr": "avg by (container) (tsdb_tuner_container_net_tx_mb)",
+          "legendFormat": "{{container}} TX MiB"
+        }
+      ]
+    }
+  ]
+}

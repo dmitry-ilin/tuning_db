@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: "tsdb-tuner"
+    orgId: 1
+    folder: "TimescaleDB Tuner"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /otel-lgtm/tuner-dashboards/tuner.json
