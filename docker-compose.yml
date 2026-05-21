@@ -27,11 +27,11 @@ services:
       retries: 20
     networks:
       - tsdb-net
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: '0.5'  # Ограничиваем до 50% CPU
-    #       memory: '512M' 
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'  
+          memory: '1400M' 
     command:
     - "postgres"
     - "-c"
@@ -60,6 +60,11 @@ services:
       retries: 20
     networks:
       - tsdb-net
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'  
+          memory: '64M' 
 
   tsbs-runner:
     build:
@@ -87,15 +92,15 @@ services:
       - ./config/postgresql.conf:/app/config/postgresql.conf
       - ./config/config.yml:/app/config/config.yml:ro
       - ./config/param_space.yml:/app/config/param_space.yml:ro
-    # depends_on:
-    #   timescaledb:
-    #     condition: service_healthy
-    #   benchmark_db:
-    #     condition: service_healthy
     networks:
       - tsdb-net
     group_add:
       - "${DOCKER_GID}"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.5'  
+          memory: '128M' 
       
 
   tuner-service:
@@ -116,13 +121,6 @@ services:
       - ./config/tuner.yml:/app/config/tuner.yml:ro
       - ./config/param_space.yml:/app/config/param_space.yml:ro
       - /var/run/docker.sock:/var/run/docker.sock
-    # depends_on:
-    #   timescaledb:
-    #     condition: service_healthy
-    #   benchmark_db:
-    #     condition: service_healthy
-    #   tsbs-runner:
-    #     condition: service_started
     networks:
       - tsdb-net
     group_add:
@@ -130,6 +128,11 @@ services:
     stdin_open: true
     tty: true
     command: ["tail", "-f", "/dev/null"]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'  
+          memory: '128M' 
 
   monitoring:
     build:
@@ -149,6 +152,11 @@ services:
       - lgtm_data:/data
     networks:
       - tsdb-net
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'  
+          memory: '512M' 
 
   tuner-exporter:
     build:
@@ -165,8 +173,11 @@ services:
       - tsdb-net
     volumes:
     - ./tsbs_data:/app/runtime:ro
-    # depends_on:
-    #   - benchmark_db
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'  
+          memory: '64M' 
 
 
 networks:

@@ -9,4 +9,4 @@ providers:
     updateIntervalSeconds: 30
     allowUiUpdates: true
     options:
-      path: /otel-lgtm/tuner-dashboards/tuner.json
+      path: /otel-lgtm/tuner-dashboards
